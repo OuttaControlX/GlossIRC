@@ -15,6 +15,7 @@ class IrcEngine(
     private val port: Int,
     private val tls: Boolean,
     private val initialNick: String,
+    private val ident: String,
     private val onLine: (String) -> Unit,
     private val onStatus: (String) -> Unit,
     private val autoReconnect: Boolean = true
@@ -41,7 +42,7 @@ class IrcEngine(
                 writer = output
                 val input = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
                 send("NICK $nick")
-                send("USER glossirc 0 * :GlossIRC Android")
+                send("USER ${ident.ifBlank { "glossirc" }.take(32)} 0 * :GlossIRC Android")
                 attempt = 0
                 onStatus("Connected to $host")
                 while (isActive) {

@@ -13,6 +13,7 @@ class ScriptEngine(context: Context) {
     private val prefs = context.getSharedPreferences("scripts", Context.MODE_PRIVATE)
     val scripts = mutableListOf<Script>()
     private val variables = mutableMapOf<String, String>()
+    fun globalVariables(): Map<String, String> = variables.toMap()
     private val variablePrefs = context.getSharedPreferences("script_variables", Context.MODE_PRIVATE)
     private fun saveVariables() {
         val json = JSONObject()
