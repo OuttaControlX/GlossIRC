@@ -14,6 +14,8 @@ class ScriptEngine(context: Context) {
     val scripts = mutableListOf<Script>()
     private val variables = mutableMapOf<String, String>()
     fun globalVariables(): Map<String, String> = variables.toMap()
+    fun editGlobalVariable(name: String, value: String) { require(name.matches(Regex("%[A-Za-z0-9_.-]{1,80}"))); variables[name] = value; saveVariables() }
+    fun deleteGlobalVariable(name: String) { variables.remove(name); saveVariables() }
     private val variablePrefs = context.getSharedPreferences("script_variables", Context.MODE_PRIVATE)
     private fun saveVariables() {
         val json = JSONObject()

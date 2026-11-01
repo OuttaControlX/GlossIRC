@@ -23,6 +23,8 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.BasicTextField
@@ -68,6 +70,8 @@ class ServerSession(val id: Int, val host: String, val nick: String) {
     val pendingJoins = mutableStateMapOf<String, String>()
     val joinedChannels = mutableStateMapOf<String, String>()
     val users = mutableStateMapOf<String, androidx.compose.runtime.snapshots.SnapshotStateList<String>>()
+    val topics = mutableStateMapOf<String, String>()
+    val ircOperators = mutableStateMapOf<String, Boolean>()
     var status by mutableStateOf("Disconnected")
     var engine: IrcEngine? = null
     init { buffer("*status") }
@@ -105,9 +109,11 @@ class IrcViewModel(application: Application) : androidx.lifecycle.AndroidViewMod
         if (i >= 0) { profiles[i] = profile.copy(autoConnect = !profile.autoConnect); persistProfiles() }
     }
 
+    val uiPrefs = application.getSharedPreferences("glossirc_ui", android.content.Context.MODE_PRIVATE)
     val scriptEngine = ScriptEngine(application)
     val dcc = DccManager(application, viewModelScope)
     val servers = mutableStateListOf<ServerSession>()
+    val soundManager = GlossSounds(application)
     var activeServer by mutableIntStateOf(-1)
     var activeBuffer by mutableStateOf("*status")
     private var nextId = 1
@@ -120,7 +126,7 @@ class IrcViewModel(application: Application) : androidx.lifecycle.AndroidViewMod
         servers.add(s); activeServer = s.id; activeBuffer = "*status"
         s.engine = IrcEngine(viewModelScope, s.host, port, tls, nick, ident,
             onLine = { raw -> viewModelScope.launch(Dispatchers.Main) { handle(s, raw) } },
-            onStatus = { msg -> viewModelScope.launch(Dispatchers.Main) { s.status = msg; s.buffer("*status").add(ChatLine("*", msg, true)) } })
+            onStatus = { msg -> viewModelScope.launch(Dispatchers.Main) { s.status = msg; s.buffer("*status").add(ChatLine("*", msg, true)); if (msg.startsWith("Connected")) soundManager.play("connect") } })
         s.engine?.connect()
     }
     fun choose(server: ServerSession, buffer: String) { activeServer = server.id; activeBuffer = server.canonical(buffer) }
@@ -181,6 +187,7 @@ class IrcViewModel(application: Application) : androidx.lifecycle.AndroidViewMod
                 val dest = if (ircKey(p[0]) == ircKey(s.engine?.nick.orEmpty())) m.sender else p[0]
                 val action = p[1].startsWith("\u0001ACTION ") && p[1].endsWith("\u0001")
                 s.buffer(dest).add(ChatLine(if (action) "* ${m.sender}" else m.sender, if (action) p[1].removePrefix("\u0001ACTION ").removeSuffix("\u0001") else p[1]))
+                if (!dest.startsWith("#") && !dest.startsWith("&") && ircKey(p[0]) == ircKey(s.engine?.nick.orEmpty())) soundManager.play("private")
             }
             "JOIN" -> if (p.isNotEmpty()) {
                 val chan = p[0]
@@ -188,6 +195,8 @@ class IrcViewModel(application: Application) : androidx.lifecycle.AndroidViewMod
                     s.pendingJoins.remove(ircKey(chan))
                     s.joinedChannels[ircKey(chan)] = chan
                     choose(s, chan)
+                    soundManager.play("join")
+                    s.engine?.send("TOPIC $chan")
                 }
                 s.buffer(chan).add(ChatLine("*", "${m.sender} joined $chan", true))
                 val users = s.userList(chan)
@@ -205,6 +214,9 @@ class IrcViewModel(application: Application) : androidx.lifecycle.AndroidViewMod
                 val channels = if (m.command == "PART") p.take(1) else s.users.keys.toList()
                 channels.forEach { ch -> s.users.entries.firstOrNull { ircKey(it.key) == ircKey(ch) }?.value?.removeAll { it.equals(m.sender, true) }; s.buffer(ch).add(ChatLine("*", "${m.sender} left", true)) }
             }
+            "332" -> if (p.size >= 3) { s.topics[ircKey(p[1])] = p[2]; s.buffer(p[1]).add(ChatLine("*", "Topic: ${p[2]}", true)) }
+            "TOPIC" -> if (p.size >= 2) { s.topics[ircKey(p[0])] = p[1]; s.buffer(p[0]).add(ChatLine("*", "Topic changed: ${p[1]}", true)) }
+            "381" -> { s.ircOperators[ircKey(s.engine?.nick.orEmpty())] = true }
             "353" -> if (p.size >= 4) {
                 val ch = p[2]; val users = s.users.getOrPut(ch) { mutableStateListOf() }
                 p[3].split(' ').filter { it.isNotBlank() }.forEach { n -> if (n !in users) users.add(n) }
@@ -255,6 +267,12 @@ class MainActivity : ComponentActivity() {
     val context = LocalContext.current
     val vm = remember { GlossRuntime.model(context.applicationContext as Application) }
     var showConnect by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var nickMenu by remember { mutableStateOf<String?>(null) }
+    var themeRevision by remember { mutableIntStateOf(0) }
+    val themeBackground = remember(themeRevision) { Color(vm.uiPrefs.getInt("background", 0xFF080D1B.toInt())) }
+    val themePanel = remember(themeRevision) { Color(vm.uiPrefs.getInt("panel", 0xFF18223B.toInt())) }
+    val themeAccent = remember(themeRevision) { Color(vm.uiPrefs.getInt("accent", 0xFF6BE6F5.toInt())) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= 33 && androidx.core.content.ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -272,8 +290,13 @@ class MainActivity : ComponentActivity() {
     var proposedChannel by remember { mutableStateOf<String?>(null) }
     val session = vm.servers.firstOrNull { it.id == vm.activeServer }
     val lines = session?.buffer(vm.activeBuffer) ?: emptyList()
-    MaterialTheme(colorScheme = darkColorScheme(primary = cyan, secondary = lavender, background = bg, surface = panel, onSurface = Color.White)) {
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF1B2850), bg, bg)))) {
+    val chatState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val atLatest by remember { derivedStateOf { chatState.firstVisibleItemIndex == 0 } }
+    LaunchedEffect(session?.id, vm.activeBuffer) { chatState.scrollToItem(0) }
+    LaunchedEffect(lines.size) { if (atLatest && lines.isNotEmpty()) chatState.animateScrollToItem(0) }
+    MaterialTheme(colorScheme = darkColorScheme(primary = themeAccent, secondary = lavender, background = themeBackground, surface = themePanel, onSurface = Color.White)) {
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(themePanel, themeBackground, themeBackground)))) {
             Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
                 Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { showDrawer = !showDrawer }) { Icon(Icons.Default.Menu, "Servers and channels", tint = cyan) }
@@ -281,11 +304,17 @@ class MainActivity : ComponentActivity() {
                         Text("GlossIRC", fontWeight = FontWeight.Bold, color = Color.White, style = MaterialTheme.typography.titleLarge)
                         Text(session?.let { "${it.host}  •  ${vm.activeBuffer}" } ?: "Connect to an IRC server", color = lavender, style = MaterialTheme.typography.labelMedium, maxLines = 1)
                     }
+                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Settings", tint = lavender) }
                     IconButton(onClick = { showTransfers = true }) { Icon(Icons.Default.FileDownload, "DCC transfers", tint = cyan) }
                     IconButton(onClick = { showScripts = true }) { Icon(Icons.Default.Code, "Script editor", tint = lavender) }
                     IconButton(onClick = { showChannels = true; session?.let { vm.requestChannels(it) } }) { Icon(Icons.Default.List, "Channel list", tint = lavender) }
                     IconButton(onClick = { showUsers = !showUsers }) { Icon(Icons.Default.People, "Nicknames", tint = cyan) }
-                    IconButton(onClick = { showConnect = true }) { Icon(Icons.Default.AddCircle, "Add server", tint = cyan) }
+                    IconButton(onClick = {
+                        if (session == null) showConnect = true
+                        else if (vm.activeBuffer == "*status") vm.disconnect(session)
+                        else if (vm.activeBuffer.startsWith("#") || vm.activeBuffer.startsWith("&")) { vm.submit("/part ${vm.activeBuffer}"); vm.choose(session, "*status") }
+                        else { session.buffers.remove(session.canonical(vm.activeBuffer)); vm.choose(session, "*status") }
+                    }) { Icon(if (session == null) Icons.Default.AddCircle else Icons.Default.Close, "Close conversation / disconnect", tint = cyan) }
                 }
                 HorizontalDivider(color = Color.White.copy(alpha = .12f))
                 if (session == null) {
@@ -298,10 +327,17 @@ class MainActivity : ComponentActivity() {
                     }
                 } else {
                     Text(session.status, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), color = lavender, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                    LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp), reverseLayout = true) {
+                    if (vm.activeBuffer.startsWith("#") || vm.activeBuffer.startsWith("&")) {
+                        session.topics[ircKey(vm.activeBuffer)]?.let { Text("Topic: $it", Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp), color = lavender, maxLines = 2) }
+                    }
+                    Box(Modifier.weight(1f)) {
+                    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), state = chatState, reverseLayout = true) {
                         items(lines.asReversed()) { line ->
                             Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-                                Text(if (line.system) "• " else "${line.author}  ", color = if (line.system) lavender else cyan, fontWeight = FontWeight.SemiBold)
+                                val rawNick = line.author.trimStart('@','+','%','&','~')
+                                val prefix = session.userList(vm.activeBuffer).firstOrNull { ircKey(it.trimStart('@','+','%','&','~')) == ircKey(rawNick) }.orEmpty()
+                                val marker = if (session.ircOperators[ircKey(rawNick)] == true || prefix.startsWith("~") || prefix.startsWith("&")) "♛ " else if (prefix.startsWith("@")) "◆ " else ""
+                                Text(if (line.system) "• " else "$marker${line.author}  ", modifier = Modifier.clickable(enabled = !line.system) { nickMenu = rawNick }, color = if (line.system) lavender else cyan, fontWeight = FontWeight.SemiBold)
                                 ClickableText(
                                     text = linkedIrcText(line.text),
                                     modifier = Modifier.weight(1f),
@@ -312,7 +348,11 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
-                    Row(Modifier.fillMaxWidth().padding(10.dp).background(panel, RoundedCornerShape(22.dp)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (!atLatest) {
+                        FilledTonalButton(onClick = { scope.launch { chatState.animateScrollToItem(0) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)) { Text("↓ Latest messages") }
+                    }
+                    }
+                    Row(Modifier.fillMaxWidth().padding(10.dp).background(themePanel, RoundedCornerShape(22.dp)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         TextField(value = draft, onValueChange = { draft = it }, placeholder = { Text("Message or /command") }, modifier = Modifier.weight(1f), singleLine = true, colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
                         IconButton(onClick = { colorPicker = true }) { Icon(Icons.Default.Palette, "Text color", tint = lavender) }
                         IconButton(onClick = { vm.submit(draft); draft = "" }) { Icon(Icons.Default.Send, "Send", tint = cyan) }
@@ -383,6 +423,19 @@ class MainActivity : ComponentActivity() {
                 TextButton(onClick = { draft += "\u000f"; colorPicker = false }) { Text("Reset formatting") }
             }
         }, confirmButton = { TextButton(onClick = { colorPicker = false }) { Text("Close") } })
+        if (nickMenu != null && session != null) {
+            val selectedNick = nickMenu!!
+            AlertDialog(onDismissRequest = { nickMenu = null }, title = { Text(selectedNick) }, text = {
+                Column {
+                    vm.scriptEngine.popupMenu("nicklist").forEach { popup ->
+                        TextButton(onClick = { vm.submit("/" + popup.command.replace("$" + "1", selectedNick).replace("#", vm.activeBuffer)); nickMenu = null }) { Text(popup.label) }
+                    }
+                    TextButton(onClick = { vm.submit("/raw WHOIS $selectedNick"); nickMenu = null }) { Text("Whois") }
+                    TextButton(onClick = { vm.choose(session, selectedNick); nickMenu = null }) { Text("Private message") }
+                }
+            }, confirmButton = { TextButton(onClick = { nickMenu = null }) { Text("Close") } })
+        }
+        if (showSettings) GlossSettings(vm, onDismiss = { showSettings = false }, onThemeChanged = { themeRevision++ })
         if (showTransfers) DccDialog(vm, onDismiss = { showTransfers = false })
         if (showScripts) ScriptEditor(vm.scriptEngine, onDismiss = { showScripts = false })
         if (showConnect) ConnectDialog(onDismiss = { showConnect = false }, onConnect = { h,p,t,n,i -> vm.saveProfile(ServerProfile(h.trim(),p,t,n.trim(), ident = i.trim())); vm.connect(h,p,t,n,i); showConnect = false; showDrawer = false })
@@ -399,7 +452,7 @@ class MainActivity : ComponentActivity() {
                         items(nicks) { nick ->
                             var expanded by remember(nick) { mutableStateOf(false) }
                             Box {
-                                Text(nick, Modifier.fillMaxWidth().clickable { expanded = true }.padding(10.dp), color = Color.White)
+                                Text((if (nick.startsWith("~") || nick.startsWith("&")) "♛ " else if (nick.startsWith("@")) "◆ " else "") + nick, Modifier.fillMaxWidth().clickable { expanded = true }.padding(10.dp), color = Color.White)
                                 DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                                     vm.scriptEngine.popupMenu("nicklist").forEach { popup ->
                                         DropdownMenuItem(text = { Text(popup.label) }, onClick = {
@@ -518,10 +571,18 @@ private fun linkedIrcText(input: String): AnnotatedString = buildAnnotatedString
                 }
             }
             if (scriptTab == "Variables") {
-                Text("Persistent global %variables (read-only). Use /set %name value and /unset %name in chat to modify.")
+                var variableName by remember { mutableStateOf("%newvar") }
+                var variableValue by remember { mutableStateOf("") }
+                Text("Edit persistent global variables")
                 engine.globalVariables().toSortedMap().forEach { (key, value) ->
-                    Text("$key = $value", fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { variableName = key; variableValue = value }) { Text("$key = $value", maxLines = 1) }
+                        TextButton(onClick = { engine.deleteGlobalVariable(key); revision++ }) { Text("Delete") }
+                    }
                 }
+                OutlinedTextField(variableName, { variableName = it }, label = { Text("Variable name") })
+                OutlinedTextField(variableValue, { variableValue = it }, label = { Text("Value") })
+                Button(onClick = { engine.editGlobalVariable(variableName, variableValue); revision++ }) { Text("Save variable") }
             } else {
             Text("Edit $scriptTab scripts. Save / Load activates changes.", style = MaterialTheme.typography.bodySmall)
             engine.scripts.toList().forEach { script ->

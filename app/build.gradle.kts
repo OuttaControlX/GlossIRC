@@ -6,7 +6,7 @@ plugins {
 android {
     namespace = "com.glossirc.app"
     compileSdk = 35
-    defaultConfig { applicationId = "com.glossirc.app"; minSdk = 26; targetSdk = 35; versionCode = 15; versionName = "1.5.0-alpha" }
+    defaultConfig { applicationId = "com.glossirc.app"; minSdk = 26; targetSdk = 35; versionCode = 18; versionName = "1.8.0-alpha" }
     buildTypes { release { isMinifyEnabled = false } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
